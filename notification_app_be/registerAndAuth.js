@@ -1,7 +1,7 @@
 "use strict";
 
 const http = require("http");
-const logger = require("../logging_middleware/logger");
+const { Log } = require("../logging_middleware/logger");
 
 const CONFIG = {
   apiBaseUrl: "http://4.224.186.213",
@@ -28,7 +28,7 @@ function apiPost(path, body) {
       }
     };
 
-    logger.info("HTTP", `Sending POST request`, { path });
+    Log("backend", "info", "auth", `Sending POST request to path: ${path}`);
 
     const req = http.request(options, (res) => {
       let responseData = "";
@@ -57,23 +57,23 @@ function apiPost(path, body) {
 
 async function register(details) {
   try {
-    logger.info("Register", "Registering on test server...");
+    Log("backend", "info", "auth", "Registering on test server...");
     const response = await apiPost(CONFIG.registerPath, details);
-    logger.info("Register", "Successfully registered! Save your credentials.", response);
+    Log("backend", "info", "auth", `Successfully registered! Client ID: ${response.clientId || response.clientID || "unknown"}`);
     return response;
   } catch (err) {
-    logger.error("Register", "Registration failed", { error: err.message });
+    Log("backend", "error", "auth", `Registration failed: ${err.message}`);
   }
 }
 
 async function authenticate(credentials) {
   try {
-    logger.info("Auth", "Authenticating to obtain access token...");
+    Log("backend", "info", "auth", "Authenticating to obtain access token...");
     const response = await apiPost(CONFIG.authPath, credentials);
-    logger.info("Auth", "Successfully authenticated!", response);
+    Log("backend", "info", "auth", `Successfully authenticated! Token length: ${response.token ? response.token.length : 0}`);
     return response;
   } catch (err) {
-    logger.error("Auth", "Authentication failed", { error: err.message });
+    Log("backend", "error", "auth", `Authentication failed: ${err.message}`);
   }
 }
 
@@ -81,7 +81,5 @@ module.exports = { register, authenticate };
 
 // If executed directly, run a quick helper command prompt guide
 if (require.main === module) {
-  console.log("\nUsage instruction:");
-  console.log("Import this module or modify the code directly with your user registration details.");
-  console.log("Execute register({ email, name, rollNo, mobileNo, githubUsername, accessCode }) to get clientID/Secret.\n");
+  Log("backend", "info", "auth", "Usage instruction: Import this module or modify the code directly with your user registration details. Execute register({ email, name, rollNo, mobileNo, githubUsername, accessCode }) to get clientID/Secret.");
 }

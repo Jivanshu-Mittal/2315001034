@@ -11,201 +11,206 @@ the volume of incoming notifications is high and they arrive in arbitrary order.
 The system must always surface the **top N most important unread notifications**
 first, where importance is jointly determined by:
 
-| Factor    | Description                                       |
-|-----------|---------------------------------------------------|
-| **Weight** | Notification type: `Placement > Result > Event`  |
-| **Recency**| More recently timestamped notifications rank higher within the same type |
+| Factor      | Description                                                             |
+|-------------|-------------------------------------------------------------------------|
+| **Weight**  | Notification type: `Placement (3) > Result (2) > Event (1)`            |
+| **Recency** | More recently timestamped notifications rank higher within the same type |
 
 ---
 
-### 2. Priority Score Design
+### 2. Data Model
 
-Each notification receives a single numeric score:
+```typescript
+interface Notification {
+  ID:        string;
+  Type:      "Placement" | "Result" | "Event";
+  Message:   string;
+  Timestamp: string; // "YYYY-MM-DD HH:mm:ss"
+}
+```
+
+---
+
+### 3. Priority Score Formula
+
+Each notification is mapped to a single numeric score:
 
 ```
 priority_score = type_weight × TYPE_SCALE + timestamp_seconds
 ```
 
-| Type      | type_weight | Notes                        |
-|-----------|-------------|------------------------------|
-| Placement | 3           | Highest — career-critical    |
-| Result    | 2           | Academic impact              |
-| Event     | 1           | Informational                |
+| Type      | type_weight | Rationale              |
+|-----------|-------------|------------------------|
+| Placement | 3           | Career-critical        |
+| Result    | 2           | Academic impact        |
+| Event     | 1           | Informational          |
 
 **`TYPE_SCALE = 2,000,000,000`**
 
-This constant is chosen to be larger than the maximum plausible Unix timestamp
-(≈ 1.7 × 10⁹ in 2026). Therefore:
+This constant exceeds the maximum plausible Unix timestamp (≈ 1.7 × 10⁹ in
+2026), guaranteeing that type weight always dominates recency. Within the same
+type, the larger timestamp (more recent) wins automatically.
 
-- A Placement notification **always** outranks a Result notification, regardless
-  of how old or new either is.
-- Within the same type, the more recent timestamp (larger Unix seconds value)
-  wins automatically — no secondary comparator needed.
-- The formula is a single integer, enabling constant-time comparison with `>`.
+**Time complexity of scoring:** `O(1)` — single multiply + add.
 
 ---
 
-### 3. Data Structure — Fixed-Size Min-Heap
-
-A **Min-Heap of capacity N** maintains the top-N notifications at all times.
+### 4. Algorithm — Fixed-Size Min-Heap
 
 #### Why a Min-Heap?
 
-| Property | Value |
-|---|---|
-| Space | O(N) |
-| Find-minimum (worst in top-N) | O(1) |
-| Insert / update | O(log N) |
-| Extract minimum | O(log N) |
+A Min-Heap of capacity **N** keeps the top-N highest-priority items in memory.
 
-The heap's **root is always the notification with the lowest priority** among the
-current top-N. Every incoming notification need only be compared against the
-root to decide its fate — no full scan required.
+| Operation                  | Complexity |
+|----------------------------|------------|
+| Peek minimum (worst in top‑N) | O(1)    |
+| Push / bubbleUp            | O(log N)   |
+| Pop / sinkDown             | O(log N)   |
+| Duplicate check via Set    | O(1)       |
+| Score each notification    | O(1)       |
+| Full poll cycle (M items)  | O(M log N) |
+| Space                      | O(N)       |
 
-#### Insertion Logic (per notification)
+The heap root is always the notification with the **lowest** score among the
+current top-N. This means every new candidate only needs to be compared
+against the root — no linear scan required.
+
+#### Insertion Decision Logic
 
 ```
 function offer(notification):
-    score = computePriorityScore(notification)
+  score = computePriorityScore(notification)        // O(1)
 
-    if heap.size < N:
-        heap.push(score, notification)          // O(log N)
+  if heap.size < N:
+    heap.push({ score, notification })              // O(log N)
+    seenIds.add(notification.ID)                    // O(1)
 
-    elif score > heap.peek().priority:
-        heap.pop()                              // O(log N)  — evicts weakest
-        heap.push(score, notification)          // O(log N)
+  elif score > heap.root.score:
+    seenIds.delete(heap.root.notification.ID)       // O(1)
+    heap.pop()                                      // O(log N) — sinkDown
+    heap.push({ score, notification })              // O(log N) — bubbleUp
+    seenIds.add(notification.ID)                    // O(1)
 
-    else:
-        discard                                 // O(1)
+  else:
+    discard                                         // O(1)
 ```
-
-#### Duplicate Detection
-
-A `Set<ID>` tracks every notification ID currently in the heap.
-- Before offering, we check the set → O(1) lookup.
-- On eviction, we remove the evicted ID from the set.
-
-This prevents the same notification from consuming two slots if the API returns
-it in multiple consecutive poll cycles.
-
----
-
-### 4. Handling New Notifications Efficiently (Streaming / Polling)
-
-New notifications arrive continuously. Rather than re-sorting the entire
-collection each time (O(M log M) where M grows unboundedly), the system:
-
-1. **Polls** the API every configurable interval (default 10 s).
-2. For each notification in the response, calls `offer()` → **O(log N)** amortised.
-3. The heap always reflects the current top-N without touching already-settled
-   high-priority items.
-
-**Result:** inserting a stream of M notifications costs **O(M log N)**, not
-O(M log M). Since N is fixed (10, 15, 20, …), this is effectively **O(M)**.
 
 #### Diagram
 
 ```
- API response  ┌─────────────┐
- [n1, n2, …]  │             │   score > heap min?
-──────────────►│  offer(nX)  ├──────────────────────► evict min, push nX
-               │             │                         O(log N)
-               └──────┬──────┘
-                      │ score ≤ heap min
-                      ▼
-                   discard  O(1)
+ Incoming notification
+         │
+         ▼
+  score = getPriorityScore()   O(1)
+         │
+    ┌────▼─────────────┐
+    │  heap.size < N?  │
+    └────┬─────────────┘
+         │ Yes              No
+         ▼                  ▼
+    push directly     score > root?
+    O(log N)          /           \
+                    Yes            No
+                     ▼              ▼
+              evict root        discard
+              push new          O(1)
+              O(log N)
 ```
 
 ---
 
-### 5. Complexity Summary
+### 5. Handling Continuous Incoming Notifications
 
-| Operation             | Time Complexity | Space Complexity |
-|-----------------------|-----------------|------------------|
-| Score a notification  | O(1)            | O(1)             |
-| Offer to inbox        | O(log N)        | —                |
-| Get top-N (sorted)    | O(N log N)      | O(N)             |
-| Duplicate check       | O(1)            | O(N) for Set     |
-| Full poll cycle       | O(M log N)      | O(N)             |
+New notifications arrive via periodic API polling (default: every 10 s).
 
----
+The heap update per notification is **O(log N)** where N is fixed (e.g., 10).
+For a stream of M total notifications processed over time, the total cost is:
 
-### 6. Logging Middleware Integration
-
-Every significant action is emitted as a **structured JSON log line** via the
-custom `Logger` module embedded in `priorityInbox.js` (no `console.log`,
-no third-party logger):
-
-```jsonc
-{"timestamp":"2026-06-10T07:00:00.000Z","level":"INFO ","context":"PriorityInbox","message":"Notification accepted (heap not full)","meta":{"id":"d146095a-…","type":"Placement","priority":6000000001751487030,"heapSize":1}}
+```
+O(M · log N)  ≈  O(M)  because N is a constant
 ```
 
-Log levels used:
+This is optimal — far better than a naïve full-sort approach of O(M log M).
 
-| Level | Usage |
-|-------|-------|
-| `DEBUG` | Per-notification score computation, heap internals |
-| `INFO`  | Poll lifecycle, batch load, accept/evict decisions |
-| `WARN`  | Non-200 HTTP responses |
-| `ERROR` | Network failures, JSON parse errors, fatal crashes |
+**Duplicate suppression** is handled by a `Set<string>` of currently-held IDs,
+giving O(1) lookup. When a notification is evicted, its ID is removed from the
+set so it can re-enter if it somehow returns with a higher score later.
 
 ---
 
-### 7. How to Run
+### 6. Complexity Summary
 
-```bash
-# Set your API bearer token
-$env:API_TOKEN = "your-token-here"   # PowerShell (Windows)
-export API_TOKEN="your-token-here"    # bash / zsh
-
-# Show top 10 (default)
-node priorityInbox.js
-
-# Show top 15
-node priorityInbox.js 15
-
-# Custom poll interval (5 s)
-$env:POLL_MS = 5000
-node priorityInbox.js 10
-```
+| Scenario                          | Time       | Space |
+|-----------------------------------|------------|-------|
+| Score a single notification       | O(1)       | O(1)  |
+| Add to priority inbox             | O(log N)   | —     |
+| Retrieve sorted top-N             | O(N log N) | O(N)  |
+| Duplicate check                   | O(1)       | O(N)  |
+| Process M notifications (stream)  | O(M log N) | O(N)  |
 
 ---
 
-### 8. Design Decisions & Trade-offs
+### 7. TypeScript Implementation Files
 
-| Decision | Rationale |
-|----------|-----------|
-| **Integer scoring over float** | Avoids floating-point comparison drift; exact ordering guaranteed |
-| **TYPE_SCALE = 2 × 10⁹** | Larger than max Unix timestamp → type always dominates recency |
-| **Min-Heap over sorted array** | O(log N) insert vs O(N) for sorted insertion |
-| **Min-Heap over Max-Heap** | Root gives us the eviction candidate in O(1) |
-| **Set for deduplication** | O(1) lookup; avoids heap bloat on repeated API polls |
-| **No DB required** | In-memory heap satisfies the constraint; stateless between restarts |
-| **Polling vs WebSocket** | API is HTTP GET only; polling is the natural fit |
-
----
-
-### 9. Future Enhancements (Beyond Stage 1)
-
-- **Priority decay**: Reduce score of old notifications over time to surface
-  fresh content even if type weight is lower.
-- **Persistent state**: Serialise the heap to disk / Redis so restarts do not
-  lose top-N state.
-- **WebSocket / Server-Sent Events**: Replace polling with a push model for
-  sub-second latency.
-- **Per-user inboxes**: Shard the heap by `userID` to personalise the top-N.
-- **Read/unread tracking**: Mark notifications as read to remove them from the
-  heap and surface the next best candidate.
+| File                                        | Purpose                                 |
+|---------------------------------------------|-----------------------------------------|
+| `logging_middleware/logger.ts`              | Reusable `Log()` function (Fetch API)   |
+| `notification_app_be/priorityInbox.ts`      | Min-Heap algorithm + HTTP polling       |
+| `notification_app_fe/src/lib/logger.ts`     | Frontend-compatible logger              |
+| `notification_app_fe/src/lib/api.ts`        | Typed API client for notifications      |
+| `notification_app_fe/src/hooks/useNotifications.ts` | React hook — paginated fetch    |
+| `notification_app_fe/src/hooks/usePriorityInbox.ts` | React hook — priority inbox     |
+| `notification_app_fe/src/components/NotificationList.tsx` | MUI list + read/unread  |
+| `notification_app_fe/src/components/PriorityInbox.tsx` | Priority inbox MUI page     |
 
 ---
 
-### 10. Execution Output Screenshots
+### 8. Logging Strategy
 
-Below are visual captures of the console execution output of `priorityInbox_demo.js` implementing the Priority Inbox algorithm:
+Every significant event uses the `Log(stack, level, package, message)` middleware:
 
-#### Screenshot 1: Initial Top-10 Notifications (Round 1 Batch)
-![Initial Output Screenshot](screenshot_initial.png)
+| Event                          | stack      | level  | package   |
+|--------------------------------|------------|--------|-----------|
+| Config loaded                  | backend    | info   | config    |
+| Notification scored & accepted | backend    | info   | service   |
+| Notification evicted           | backend    | info   | service   |
+| API request sent               | backend    | info   | service   |
+| API non-200 response           | backend    | warn   | service   |
+| Network error                  | backend    | error  | service   |
+| Process crash                  | backend    | fatal  | service   |
+| Frontend hook fetch success    | frontend   | info   | hook      |
+| Frontend hook fetch error      | frontend   | error  | hook      |
+| Frontend component mounted     | frontend   | debug  | component |
 
-#### Screenshot 2: Updated Top-10 Notifications (After Round 2 Stream Arrivals & Eviction)
-![Updated Output Screenshot](screenshot_updated.png)
+---
 
+### 9. Output Screenshots
+
+#### Initial Top-10 (Round 1 Batch)
+![Initial Output](screenshot_initial.png)
+
+#### Updated Top-10 (After Stream Arrival)
+![Updated Output](screenshot_updated.png)
+
+---
+
+### 10. Design Decisions & Trade-offs
+
+| Decision                        | Rationale                                                   |
+|---------------------------------|-------------------------------------------------------------|
+| Integer score (no float)        | Avoids floating-point drift; exact ordering guaranteed      |
+| TYPE_SCALE = 2 × 10⁹            | Larger than max Unix timestamp → type always dominates      |
+| Min-Heap over Max-Heap          | Root = eviction candidate → O(1) comparison for new items   |
+| Min-Heap over sorted array      | O(log N) insert vs O(N) for sorted insertion                |
+| Set for deduplication           | O(1) lookup; avoids bloat on repeated polls                 |
+| Polling over WebSocket          | API is HTTP GET only; polling is the natural fit            |
+
+---
+
+### 11. Future Enhancements
+
+- **Score decay**: Reduce score of old notifications to surface fresh content.
+- **Persistent state**: Serialise the heap to Redis for restart resilience.
+- **Real-time push**: Replace polling with WebSocket / Server-Sent Events.
+- **Per-user inboxes**: Shard by `userID` to personalise the top-N.
+- **Read/unread tracking**: Remove read notifications and promote next-best.

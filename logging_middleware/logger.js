@@ -47,10 +47,10 @@ function Log(stack, level, packageField, message) {
 
   // Local console log fallback / helper (so logs are visible in the terminal output)
   const localTimestamp = new Date().toISOString();
-  console.log(JSON.stringify({
+  process.stdout.write(JSON.stringify({
     timestamp: localTimestamp,
     ...payload
-  }));
+  }) + "\n");
 
   const token = process.env.API_TOKEN;
   if (!token) {

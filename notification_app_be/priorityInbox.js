@@ -210,22 +210,22 @@ function renderTable(notifications, limit) {
   const lineSeparator = "═".repeat(75);
   const thinSeparator = "-".repeat(75);
 
-  console.log(`\n${lineSeparator}`);
-  console.log(`  🏆  TOP ${limit} NOTIFICATIONS`);
-  console.log(`  📅  Updated: ${new Date().toLocaleString()}`);
-  console.log(lineSeparator);
-  console.log(`  ${"RANK".padEnd(6)} ${"TYPE".padEnd(12)} ${"TIMESTAMP".padEnd(22)} MESSAGE`);
-  console.log(thinSeparator);
+  process.stdout.write(`\n${lineSeparator}\n`);
+  process.stdout.write(`  🏆  TOP ${limit} NOTIFICATIONS\n`);
+  process.stdout.write(`  📅  Updated: ${new Date().toLocaleString()}\n`);
+  process.stdout.write(`${lineSeparator}\n`);
+  process.stdout.write(`  ${"RANK".padEnd(6)} ${"TYPE".padEnd(12)} ${"TIMESTAMP".padEnd(22)} MESSAGE\n`);
+  process.stdout.write(`${thinSeparator}\n`);
 
   notifications.forEach((item, index) => {
     const rank = `#${index + 1}`.padEnd(6);
     const type = item.Type.padEnd(12);
     const timestamp = item.Timestamp.padEnd(22);
     const msg = item.Message || "";
-    console.log(`  ${rank} ${type} ${timestamp} ${msg}`);
+    process.stdout.write(`  ${rank} ${type} ${timestamp} ${msg}\n`);
   });
 
-  console.log(`${lineSeparator}\n`);
+  process.stdout.write(`${lineSeparator}\n\n`);
 }
 
 async function startApp() {
