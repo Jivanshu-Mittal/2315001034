@@ -1,402 +1,305 @@
-/**
- * ============================================================
- *  Campus Notifications Microservice — Stage 1
- *  Priority Inbox: Top-N Unread Notifications
- * ============================================================
- *
- *  Priority is determined by:
- *    1. Type Weight  : Placement (3) > Result (2) > Event (1)
- *    2. Recency      : More recent timestamp → higher priority
- *
- *  Data structure  : Min-Heap of fixed size N
- *  Insertion cost  : O(log N) per notification
- *  Space           : O(N)
- *
- *  Usage:
- *    node priorityInbox.js [topN]          (default N = 10)
- *    node priorityInbox.js 15              (show top 15)
- *
- *  Environment variables:
- *    API_TOKEN   — Bearer token for the protected notification API
- *    POLL_MS     — Polling interval in milliseconds (default 10000)
- * ============================================================
- */
-
 "use strict";
 
 const http = require("http");
 
-// ─── Logger (Logging Middleware) ──────────────────────────────────────────────
-const Logger = (() => {
-  const LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
-  const LABELS = ["DEBUG", "INFO ", "WARN ", "ERROR"];
-
-  let minLevel = LEVELS.DEBUG;
-
-  function _timestamp() {
-    return new Date().toISOString();
-  }
-
-  function _log(level, context, message, meta) {
-    if (level < minLevel) return;
-    const entry = {
-      timestamp: _timestamp(),
-      level: LABELS[level],
+// Simple structured logging utility
+const logger = {
+  debug(context, message, meta) {
+    this._log("DEBUG", context, message, meta);
+  },
+  info(context, message, meta) {
+    this._log("INFO", context, message, meta);
+  },
+  warn(context, message, meta) {
+    this._log("WARN", context, message, meta);
+  },
+  error(context, message, meta) {
+    this._log("ERROR", context, message, meta);
+  },
+  _log(level, context, message, meta) {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      level,
       context,
       message,
-      ...(meta !== undefined ? { meta } : {}),
+      ...(meta ? { meta } : {})
     };
-    process.stdout.write(JSON.stringify(entry) + "\n");
+    process.stdout.write(JSON.stringify(logEntry) + "\n");
   }
-
-  return {
-    setLevel: (level) => { minLevel = LEVELS[level] ?? LEVELS.DEBUG; },
-    debug: (ctx, msg, meta) => _log(LEVELS.DEBUG, ctx, msg, meta),
-    info:  (ctx, msg, meta) => _log(LEVELS.INFO,  ctx, msg, meta),
-    warn:  (ctx, msg, meta) => _log(LEVELS.WARN,  ctx, msg, meta),
-    error: (ctx, msg, meta) => _log(LEVELS.ERROR, ctx, msg, meta),
-  };
-})();
-
-// ─── Configuration ─────────────────────────────────────────────────────────────
-const CONFIG = {
-  API_BASE_URL : "http://4.224.186.213",
-  API_PATH     : "/evaluation-service/notifications",
-  API_TOKEN    : process.env.API_TOKEN || "",
-  TOP_N        : parseInt(process.argv[2], 10) || 10,
-  POLL_MS      : parseInt(process.env.POLL_MS, 10) || 10_000,
 };
 
-Logger.info("Config", "Loaded configuration", {
-  topN: CONFIG.TOP_N,
-  pollIntervalMs: CONFIG.POLL_MS,
-  hasToken: CONFIG.API_TOKEN.length > 0,
+// Configuration defaults
+const CONFIG = {
+  apiBaseUrl: "http://4.224.186.213",
+  apiPath: "/evaluation-service/notifications",
+  apiToken: process.env.API_TOKEN || "",
+  topN: parseInt(process.argv[2], 10) || 10,
+  pollIntervalMs: parseInt(process.env.POLL_MS, 10) || 10000,
+};
+
+logger.info("Config", "Loaded system configuration", {
+  topN: CONFIG.topN,
+  pollIntervalMs: CONFIG.pollIntervalMs,
+  hasToken: !!CONFIG.apiToken
 });
 
-// ─── Type Priority Weights ──────────────────────────────────────────────────────
 const TYPE_WEIGHTS = {
-  Placement : 3,
-  Result    : 2,
-  Event     : 1,
+  Placement: 3,
+  Result: 2,
+  Event: 1
 };
 
-/**
- * Compute a numeric priority score for a notification.
- *
- * Formula:
- *   score = typeWeight * TYPE_SCALE + timestampSeconds
- *
- *   TYPE_SCALE is chosen so that the lowest-weight type difference (1 point)
- *   always outweighs a recency difference of up to ~31 years of seconds
- *   (≈ 10^9 s), guaranteeing type always dominates, while Unix seconds
- *   cleanly break ties within the same type.
- *
- * @param {{ Type: string, Timestamp: string }} notification
- * @returns {number}
- */
-function computePriorityScore(notification) {
-  const TYPE_SCALE = 2_000_000_000; // > max plausible Unix timestamp
-  const weight = TYPE_WEIGHTS[notification.Type] ?? 0;
-  const recencySeconds = Math.floor(
-    new Date(notification.Timestamp).getTime() / 1000
-  );
-
-  const score = weight * TYPE_SCALE + recencySeconds;
-
-  Logger.debug("Score", `Computed score for ${notification.ID}`, {
-    type: notification.Type,
-    weight,
-    recencySeconds,
-    score,
-  });
-
-  return score;
+// Calculates priority score where type weight dominates, and recency breaks ties.
+// 2,000,000,000 is larger than any plausible UNIX timestamp, ensuring weight priority.
+function getPriorityScore(notification) {
+  const weight = TYPE_WEIGHTS[notification.Type] || 0;
+  const timestampSeconds = Math.floor(new Date(notification.Timestamp).getTime() / 1000);
+  return weight * 2000000000 + timestampSeconds;
 }
 
-// ─── Min-Heap ──────────────────────────────────────────────────────────────────
-/**
- * MinHeap<T> where T has a numeric `.priority` field.
- * Maintains the N highest-priority items seen so far.
- *
- * Invariant: heap[0] is always the item with the LOWEST priority,
- * making it cheap to decide whether a new arrival displaces it.
- */
+// Min-heap to efficiently track the top N elements in O(log N)
 class MinHeap {
   constructor() {
-    /** @type {Array<{priority: number, notification: object}>} */
-    this.heap = [];
+    this.elements = [];
   }
 
-  get size() { return this.heap.length; }
+  get size() {
+    return this.elements.length;
+  }
 
-  /** Cheaply read the current minimum (the item most likely to be evicted). */
-  peek() { return this.heap[0] ?? null; }
+  peek() {
+    return this.elements[0] || null;
+  }
 
   push(item) {
-    this.heap.push(item);
-    this._bubbleUp(this.heap.length - 1);
-    Logger.debug("MinHeap", "Pushed item", { heapSize: this.heap.length, priority: item.priority });
+    this.elements.push(item);
+    this.bubbleUp(this.elements.length - 1);
   }
 
   pop() {
-    if (this.heap.length === 0) return null;
-    const top = this.heap[0];
-    const last = this.heap.pop();
-    if (this.heap.length > 0) {
-      this.heap[0] = last;
-      this._sinkDown(0);
+    if (this.elements.length === 0) return null;
+    const minItem = this.elements[0];
+    const lastItem = this.elements.pop();
+    
+    if (this.elements.length > 0) {
+      this.elements[0] = lastItem;
+      this.sinkDown(0);
     }
-    Logger.debug("MinHeap", "Popped minimum item", { priority: top.priority });
-    return top;
+    return minItem;
   }
 
-  _bubbleUp(i) {
-    while (i > 0) {
-      const parent = Math.floor((i - 1) / 2);
-      if (this.heap[parent].priority <= this.heap[i].priority) break;
-      [this.heap[parent], this.heap[i]] = [this.heap[i], this.heap[parent]];
-      i = parent;
+  bubbleUp(index) {
+    while (index > 0) {
+      const parentIndex = Math.floor((index - 1) / 2);
+      if (this.elements[parentIndex].priority <= this.elements[index].priority) {
+        break;
+      }
+      this.swap(parentIndex, index);
+      index = parentIndex;
     }
   }
 
-  _sinkDown(i) {
-    const n = this.heap.length;
+  sinkDown(index) {
+    const length = this.elements.length;
     while (true) {
-      let smallest = i;
-      const l = 2 * i + 1;
-      const r = 2 * i + 2;
-      if (l < n && this.heap[l].priority < this.heap[smallest].priority) smallest = l;
-      if (r < n && this.heap[r].priority < this.heap[smallest].priority) smallest = r;
-      if (smallest === i) break;
-      [this.heap[smallest], this.heap[i]] = [this.heap[i], this.heap[smallest]];
-      i = smallest;
+      let smallestIndex = index;
+      const leftChild = 2 * index + 1;
+      const rightChild = 2 * index + 2;
+
+      if (leftChild < length && this.elements[leftChild].priority < this.elements[smallestIndex].priority) {
+        smallestIndex = leftChild;
+      }
+      if (rightChild < length && this.elements[rightChild].priority < this.elements[smallestIndex].priority) {
+        smallestIndex = rightChild;
+      }
+      if (smallestIndex === index) {
+        break;
+      }
+      this.swap(index, smallestIndex);
+      index = smallestIndex;
     }
   }
 
-  /** Return items sorted highest-priority first (non-destructive). */
-  toSortedArray() {
-    return [...this.heap]
+  swap(i, j) {
+    const temp = this.elements[i];
+    this.elements[i] = this.elements[j];
+    this.elements[j] = temp;
+  }
+
+  getSortedList() {
+    return [...this.elements]
       .sort((a, b) => b.priority - a.priority)
-      .map((e) => e.notification);
+      .map(entry => entry.notification);
   }
 }
 
-// ─── Priority Inbox ────────────────────────────────────────────────────────────
-/**
- * PriorityInbox keeps only the top-N highest-priority unread notifications.
- *
- * Efficient streaming update strategy:
- *   - Every new notification is scored in O(1).
- *   - If heap has fewer than N items  → push unconditionally  O(log N).
- *   - If new score > heap minimum     → replace root, sinkDown O(log N).
- *   - Otherwise                       → discard               O(1).
- *
- * This means we never need to sort or scan the full list for each new item.
- */
+// Priority Inbox maintains only the top N highest priority notifications
 class PriorityInbox {
-  /**
-   * @param {number} topN   Maximum number of notifications to keep.
-   */
   constructor(topN) {
     this.topN = topN;
     this.heap = new MinHeap();
-    /** Track IDs already in the heap to avoid duplicates. */
     this.seenIds = new Set();
-
-    Logger.info("PriorityInbox", `Initialised with topN=${topN}`);
   }
 
-  /**
-   * Offer a notification to the inbox.
-   * Returns true if the notification made it into the top-N.
-   *
-   * @param {object} notification
-   */
   offer(notification) {
     if (this.seenIds.has(notification.ID)) {
-      Logger.debug("PriorityInbox", "Duplicate notification skipped", { id: notification.ID });
-      return false;
+      return false; // Skip duplicates
     }
 
-    const priority = computePriorityScore(notification);
+    const priority = getPriorityScore(notification);
     const entry = { priority, notification };
 
     if (this.heap.size < this.topN) {
-      // Heap not full yet — always accept.
       this.heap.push(entry);
       this.seenIds.add(notification.ID);
-      Logger.info("PriorityInbox", "Notification accepted (heap not full)", {
+      logger.info("PriorityInbox", "Notification added to heap", {
         id: notification.ID,
         type: notification.Type,
-        priority,
-        heapSize: this.heap.size,
+        heapSize: this.heap.size
       });
       return true;
     }
 
     const minEntry = this.heap.peek();
     if (priority > minEntry.priority) {
-      // New item is better than current worst — evict worst, add new.
-      Logger.info("PriorityInbox", "Evicting low-priority notification", {
-        evictedId: minEntry.notification.ID,
-        evictedPriority: minEntry.priority,
-        incomingId: notification.ID,
-        incomingPriority: priority,
-      });
+      // Evict lowest priority element and insert incoming
       this.seenIds.delete(minEntry.notification.ID);
       this.heap.pop();
       this.heap.push(entry);
       this.seenIds.add(notification.ID);
+
+      logger.info("PriorityInbox", "Evicted lower priority notification", {
+        evictedId: minEntry.notification.ID,
+        insertedId: notification.ID,
+        insertedType: notification.Type
+      });
       return true;
     }
 
-    Logger.debug("PriorityInbox", "Notification rejected (below threshold)", {
-      id: notification.ID,
-      priority,
-      currentMin: minEntry.priority,
-    });
     return false;
   }
 
-  /**
-   * Bulk-load an array of notifications.
-   * @param {object[]} notifications
-   */
   loadBatch(notifications) {
-    Logger.info("PriorityInbox", `Loading batch of ${notifications.length} notifications`);
-    let accepted = 0;
-    for (const n of notifications) {
-      if (this.offer(n)) accepted++;
+    let insertedCount = 0;
+    for (const notification of notifications) {
+      if (this.offer(notification)) {
+        insertedCount++;
+      }
     }
-    Logger.info("PriorityInbox", `Batch loaded`, {
+    logger.info("PriorityInbox", "Finished processing batch", {
       total: notifications.length,
-      accepted,
-      rejected: notifications.length - accepted,
+      inserted: insertedCount
     });
   }
 
-  /**
-   * Return the top-N notifications sorted highest-priority first.
-   * @returns {object[]}
-   */
   getTopNotifications() {
-    return this.heap.toSortedArray();
+    return this.heap.getSortedList();
   }
 }
 
-// ─── HTTP Client ───────────────────────────────────────────────────────────────
-/**
- * Fetch notifications from the protected API.
- * @returns {Promise<object[]>}
- */
+// HTTP request helper to call the protected API
 function fetchNotifications() {
   return new Promise((resolve, reject) => {
-    Logger.info("HTTP", "Fetching notifications from API", { url: CONFIG.API_BASE_URL + CONFIG.API_PATH });
+    logger.info("HTTP", "Requesting notifications from external API");
 
+    const url = new URL(CONFIG.apiBaseUrl);
     const options = {
-      hostname : new URL(CONFIG.API_BASE_URL).hostname,
-      port     : 80,
-      path     : CONFIG.API_PATH,
-      method   : "GET",
-      headers  : {
-        "Content-Type"  : "application/json",
-        "Accept"        : "application/json",
-        ...(CONFIG.API_TOKEN
-          ? { Authorization: `Bearer ${CONFIG.API_TOKEN}` }
-          : {}),
-      },
+      hostname: url.hostname,
+      port: url.port || 80,
+      path: CONFIG.apiPath,
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        ...(CONFIG.apiToken ? { "Authorization": `Bearer ${CONFIG.apiToken}` } : {})
+      }
     };
 
     const req = http.request(options, (res) => {
-      Logger.info("HTTP", `Response received`, { statusCode: res.statusCode });
+      logger.info("HTTP", "Received response headers", { statusCode: res.statusCode });
 
-      let raw = "";
-      res.on("data", (chunk) => { raw += chunk; });
+      let data = "";
+      res.on("data", (chunk) => {
+        data += chunk;
+      });
+
       res.on("end", () => {
         if (res.statusCode === 200) {
           try {
-            const body = JSON.parse(raw);
-            const notifications = body.notifications ?? [];
-            Logger.info("HTTP", `Parsed ${notifications.length} notifications from response`);
-            resolve(notifications);
+            const body = JSON.parse(data);
+            resolve(body.notifications || []);
           } catch (err) {
-            Logger.error("HTTP", "JSON parse error", { error: err.message, raw: raw.slice(0, 200) });
+            logger.error("HTTP", "Failed to parse API JSON response", { error: err.message });
             reject(err);
           }
         } else {
-          Logger.warn("HTTP", "Non-200 response", { statusCode: res.statusCode, body: raw.slice(0, 200) });
-          reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 200)}`));
+          logger.warn("HTTP", "API returned non-200 status", { statusCode: res.statusCode });
+          reject(new Error(`API responded with status code ${res.statusCode}`));
         }
       });
     });
 
     req.on("error", (err) => {
-      Logger.error("HTTP", "Request failed", { error: err.message });
+      logger.error("HTTP", "Connection error", { error: err.message });
       reject(err);
     });
 
     req.setTimeout(8000, () => {
-      Logger.error("HTTP", "Request timed out");
-      req.destroy(new Error("Request timed out"));
+      logger.error("HTTP", "Request timed out after 8 seconds");
+      req.destroy(new Error("Timeout"));
     });
 
     req.end();
   });
 }
 
-// ─── Display ───────────────────────────────────────────────────────────────────
-function displayTopNotifications(notifications, topN) {
-  const divider = "─".repeat(72);
-  const header  = `  TOP ${topN} PRIORITY NOTIFICATIONS  [${new Date().toLocaleString()}]`;
+// Clean command-line layout display
+function renderTable(notifications, limit) {
+  const lineSeparator = "=".repeat(75);
+  const thinSeparator = "-".repeat(75);
 
-  process.stdout.write(`\n${divider}\n${header}\n${divider}\n`);
+  console.log(`\n${lineSeparator}`);
+  console.log(`  🏆  TOP ${limit} NOTIFICATIONS`);
+  console.log(`  📅  Updated: ${new Date().toLocaleString()}`);
+  console.log(lineSeparator);
+  console.log(`  ${"RANK".padEnd(6)} ${"TYPE".padEnd(12)} ${"TIMESTAMP".padEnd(22)} MESSAGE`);
+  console.log(thinSeparator);
 
-  if (notifications.length === 0) {
-    process.stdout.write("  (no notifications available)\n");
-  } else {
-    notifications.forEach((n, idx) => {
-      const rank   = String(idx + 1).padStart(2, " ");
-      const type   = (n.Type || "Unknown").padEnd(10, " ");
-      const ts     = n.Timestamp || "N/A";
-      const msg    = n.Message || "";
-      process.stdout.write(`  ${rank}. [${type}] ${ts}  |  ${msg}\n`);
-    });
-  }
+  notifications.forEach((item, index) => {
+    const rank = `#${index + 1}`.padEnd(6);
+    const type = item.Type.padEnd(12);
+    const timestamp = item.Timestamp.padEnd(22);
+    const msg = item.Message || "";
+    console.log(`  ${rank} ${type} ${timestamp} ${msg}`);
+  });
 
-  process.stdout.write(`${divider}\n\n`);
+  console.log(`${lineSeparator}\n`);
 }
 
-// ─── Main ──────────────────────────────────────────────────────────────────────
-async function main() {
-  Logger.info("Main", "=== Campus Priority Inbox — Stage 1 ===");
+// Main execution process
+async function startApp() {
+  logger.info("Main", "Initializing Priority Inbox App");
+  const inbox = new PriorityInbox(CONFIG.topN);
 
-  const inbox = new PriorityInbox(CONFIG.TOP_N);
-
-  /**
-   * Poll cycle: fetch → offer each notification → display top-N.
-   */
-  async function pollCycle() {
+  async function poll() {
     try {
-      const notifications = await fetchNotifications();
-      inbox.loadBatch(notifications);
-      const top = inbox.getTopNotifications();
-      displayTopNotifications(top, CONFIG.TOP_N);
-      Logger.info("Poll", `Cycle complete`, { heapSize: inbox.heap.size, topN: CONFIG.TOP_N });
+      const data = await fetchNotifications();
+      inbox.loadBatch(data);
+      renderTable(inbox.getTopNotifications(), CONFIG.topN);
     } catch (err) {
-      Logger.error("Poll", "Cycle failed", { error: err.message });
+      logger.error("Main", "Polling iteration failed", { error: err.message });
     }
   }
 
-  // Initial fetch
-  await pollCycle();
+  // First poll cycle
+  await poll();
 
-  // Subsequent polls to handle newly arriving notifications efficiently.
-  // The heap update is O(log N) per new notification — no full re-sort needed.
-  Logger.info("Main", `Polling every ${CONFIG.POLL_MS} ms for new notifications…`);
-  setInterval(pollCycle, CONFIG.POLL_MS);
+  // Subsequent intervals
+  logger.info("Main", `Scheduling polling timer every ${CONFIG.pollIntervalMs}ms`);
+  setInterval(poll, CONFIG.pollIntervalMs);
 }
 
-main().catch((err) => {
-  Logger.error("Main", "Fatal error", { error: err.message, stack: err.stack });
+startApp().catch((err) => {
+  logger.error("Main", "Process crashed", { error: err.message });
   process.exit(1);
 });
