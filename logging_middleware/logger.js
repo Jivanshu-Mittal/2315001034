@@ -1,36 +1,98 @@
 "use strict";
 
-class Logger {
-  constructor(defaultContext = "System") {
-    this.defaultContext = defaultContext;
+const http = require("http");
+
+// Valid enum values for validation
+const VALID_STACKS = new Set(["backend", "frontend"]);
+const VALID_LEVELS = new Set(["debug", "info", "warn", "error", "fatal"]);
+
+const VALID_PACKAGES = new Set([
+  // Backend only
+  "cache", "controller", "cron_job", "db", "domain", "handler", "repository", "route", "service",
+  // Frontend only
+  "api", "component", "hook", "page", "state", "style",
+  // Shared
+  "auth", "config", "middleware", "utils"
+]);
+
+/**
+ * Reusable Log function making an API call to the Test Server.
+ * Signature: Log(stack, level, packageField, message)
+ * 
+ * Note: 'packageField' maps to the "package" key in the JSON request body.
+ */
+function Log(stack, level, packageField, message) {
+  // Normalize inputs to lowercase as required by constraints
+  const normalizedStack = String(stack).toLowerCase();
+  const normalizedLevel = String(level).toLowerCase();
+  const normalizedPackage = String(packageField).toLowerCase();
+  
+  // Validate constraints
+  if (!VALID_STACKS.has(normalizedStack)) {
+    console.warn(`[Logger Warning] Invalid stack value: "${stack}"`);
+  }
+  if (!VALID_LEVELS.has(normalizedLevel)) {
+    console.warn(`[Logger Warning] Invalid level value: "${level}"`);
+  }
+  if (!VALID_PACKAGES.has(normalizedPackage)) {
+    console.warn(`[Logger Warning] Invalid package value: "${packageField}"`);
   }
 
-  debug(context, message, meta) {
-    this._log("DEBUG", context || this.defaultContext, message, meta);
+  const payload = {
+    stack: normalizedStack,
+    level: normalizedLevel,
+    package: normalizedPackage,
+    message: String(message)
+  };
+
+  // Local console log fallback / helper (so logs are visible in the terminal output)
+  const localTimestamp = new Date().toISOString();
+  console.log(JSON.stringify({
+    timestamp: localTimestamp,
+    ...payload
+  }));
+
+  const token = process.env.API_TOKEN;
+  if (!token) {
+    // If no token is provided, log locally and skip network call
+    return;
   }
 
-  info(context, message, meta) {
-    this._log("INFO", context || this.defaultContext, message, meta);
-  }
+  // Perform asynchronous POST request to the evaluation service
+  const bodyData = JSON.stringify(payload);
+  const options = {
+    hostname: "4.224.186.213",
+    port: 80,
+    path: "/evaluation-service/logs",
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(bodyData),
+      "Authorization": `Bearer ${token}`
+    }
+  };
 
-  warn(context, message, meta) {
-    this._log("WARN", context || this.defaultContext, message, meta);
-  }
+  const req = http.request(options, (res) => {
+    let responseBody = "";
+    res.on("data", (chunk) => { responseBody += chunk; });
+    res.on("end", () => {
+      if (res.statusCode !== 200) {
+        // Log log-dispatch failure locally without raising exceptions
+        console.error(`[Logger Error] Remote logging API failed (HTTP ${res.statusCode}): ${responseBody}`);
+      }
+    });
+  });
 
-  error(context, message, meta) {
-    this._log("ERROR", context || this.defaultContext, message, meta);
-  }
+  req.on("error", (err) => {
+    console.error(`[Logger Error] Failed to send log to remote API: ${err.message}`);
+  });
 
-  _log(level, context, message, meta) {
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      level,
-      context,
-      message,
-      ...(meta ? { meta } : {})
-    };
-    process.stdout.write(JSON.stringify(logEntry) + "\n");
-  }
+  req.setTimeout(3000, () => {
+    req.destroy(new Error("Timeout"));
+  });
+
+  req.write(bodyData);
+  req.end();
 }
 
-module.exports = new Logger();
+module.exports = { Log };

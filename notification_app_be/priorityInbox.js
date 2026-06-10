@@ -1,7 +1,7 @@
 "use strict";
 
 const http = require("http");
-const logger = require("../logging_middleware/logger");
+const { Log } = require("../logging_middleware/logger");
 
 const CONFIG = {
   apiBaseUrl: "http://4.224.186.213",
@@ -11,11 +11,7 @@ const CONFIG = {
   pollIntervalMs: parseInt(process.env.POLL_MS, 10) || 10000,
 };
 
-logger.info("Config", "Loaded system configuration", {
-  topN: CONFIG.topN,
-  pollIntervalMs: CONFIG.pollIntervalMs,
-  hasToken: !!CONFIG.apiToken
-});
+Log("backend", "info", "config", `Loaded system configuration with topN: ${CONFIG.topN}, pollIntervalMs: ${CONFIG.pollIntervalMs}`);
 
 const TYPE_WEIGHTS = {
   Placement: 3,
@@ -122,11 +118,7 @@ class PriorityInbox {
     if (this.heap.size < this.topN) {
       this.heap.push(entry);
       this.seenIds.add(notification.ID);
-      logger.info("PriorityInbox", "Notification added to heap", {
-        id: notification.ID,
-        type: notification.Type,
-        heapSize: this.heap.size
-      });
+      Log("backend", "info", "service", `Notification added to heap: ID=${notification.ID}, Type=${notification.Type}`);
       return true;
     }
 
@@ -137,11 +129,7 @@ class PriorityInbox {
       this.heap.push(entry);
       this.seenIds.add(notification.ID);
 
-      logger.info("PriorityInbox", "Evicted lower priority notification", {
-        evictedId: minEntry.notification.ID,
-        insertedId: notification.ID,
-        insertedType: notification.Type
-      });
+      Log("backend", "info", "service", `Evicted lower priority notification ID=${minEntry.notification.ID} to insert incoming ID=${notification.ID} (${notification.Type})`);
       return true;
     }
 
@@ -155,10 +143,7 @@ class PriorityInbox {
         insertedCount++;
       }
     }
-    logger.info("PriorityInbox", "Finished processing batch", {
-      total: notifications.length,
-      inserted: insertedCount
-    });
+    Log("backend", "info", "service", `Finished processing batch of ${notifications.length} elements (inserted: ${insertedCount})`);
   }
 
   getTopNotifications() {
@@ -168,7 +153,7 @@ class PriorityInbox {
 
 function fetchNotifications() {
   return new Promise((resolve, reject) => {
-    logger.info("HTTP", "Requesting notifications from external API");
+    Log("backend", "info", "service", "Requesting notifications from external API");
 
     const url = new URL(CONFIG.apiBaseUrl);
     const options = {
@@ -184,7 +169,7 @@ function fetchNotifications() {
     };
 
     const req = http.request(options, (res) => {
-      logger.info("HTTP", "Received response headers", { statusCode: res.statusCode });
+      Log("backend", "info", "service", `Received API response headers with status: ${res.statusCode}`);
 
       let data = "";
       res.on("data", (chunk) => {
@@ -197,23 +182,23 @@ function fetchNotifications() {
             const body = JSON.parse(data);
             resolve(body.notifications || []);
           } catch (err) {
-            logger.error("HTTP", "Failed to parse API JSON response", { error: err.message });
+            Log("backend", "error", "service", `Failed to parse API JSON response: ${err.message}`);
             reject(err);
           }
         } else {
-          logger.warn("HTTP", "API returned non-200 status", { statusCode: res.statusCode });
+          Log("backend", "warn", "service", `API returned non-200 status code: ${res.statusCode}`);
           reject(new Error(`API responded with status code ${res.statusCode}`));
         }
       });
     });
 
     req.on("error", (err) => {
-      logger.error("HTTP", "Connection error", { error: err.message });
+      Log("backend", "error", "service", `Connection error: ${err.message}`);
       reject(err);
     });
 
     req.setTimeout(8000, () => {
-      logger.error("HTTP", "Request timed out after 8 seconds");
+      Log("backend", "error", "service", "Request timed out after 8 seconds");
       req.destroy(new Error("Timeout"));
     });
 
@@ -222,7 +207,7 @@ function fetchNotifications() {
 }
 
 function renderTable(notifications, limit) {
-  const lineSeparator = "=".repeat(75);
+  const lineSeparator = "═".repeat(75);
   const thinSeparator = "-".repeat(75);
 
   console.log(`\n${lineSeparator}`);
@@ -244,7 +229,7 @@ function renderTable(notifications, limit) {
 }
 
 async function startApp() {
-  logger.info("Main", "Initializing Priority Inbox App");
+  Log("backend", "info", "service", "Initializing Priority Inbox App");
   const inbox = new PriorityInbox(CONFIG.topN);
 
   async function poll() {
@@ -253,17 +238,17 @@ async function startApp() {
       inbox.loadBatch(data);
       renderTable(inbox.getTopNotifications(), CONFIG.topN);
     } catch (err) {
-      logger.error("Main", "Polling iteration failed", { error: err.message });
+      Log("backend", "error", "service", `Polling iteration failed: ${err.message}`);
     }
   }
 
   await poll();
 
-  logger.info("Main", `Scheduling polling timer every ${CONFIG.pollIntervalMs}ms`);
+  Log("backend", "info", "cron_job", `Scheduling polling timer every ${CONFIG.pollIntervalMs}ms`);
   setInterval(poll, CONFIG.pollIntervalMs);
 }
 
 startApp().catch((err) => {
-  logger.error("Main", "Process crashed", { error: err.message });
+  Log("backend", "fatal", "service", `Process crashed: ${err.message}`);
   process.exit(1);
 });

@@ -1,6 +1,6 @@
 "use strict";
 
-const logger = require("../logging_middleware/logger");
+const { Log } = require("../logging_middleware/logger");
 
 const SAMPLE_NOTIFICATIONS = [
   { ID: "d146095a-0d86-4a34-9e69-3900a14576bc", Type: "Result",    Message: "mid-sem",                       Timestamp: "2026-04-22 17:51:30" },
@@ -120,11 +120,7 @@ class PriorityInbox {
     if (this.heap.size < this.topN) {
       this.heap.push(entry);
       this.seenIds.add(notification.ID);
-      logger.info("PriorityInbox", "Notification added to heap", {
-        id: notification.ID,
-        type: notification.Type,
-        heapSize: this.heap.size
-      });
+      Log("backend", "info", "service", `Notification added to heap: ID=${notification.ID}, Type=${notification.Type}`);
       return true;
     }
 
@@ -135,11 +131,7 @@ class PriorityInbox {
       this.heap.push(entry);
       this.seenIds.add(notification.ID);
 
-      logger.info("PriorityInbox", "Evicted lower priority notification", {
-        evictedId: minEntry.notification.ID,
-        insertedId: notification.ID,
-        insertedType: notification.Type
-      });
+      Log("backend", "info", "service", `Evicted lower priority notification ID=${minEntry.notification.ID} to insert incoming ID=${notification.ID} (${notification.Type})`);
       return true;
     }
 
@@ -153,10 +145,7 @@ class PriorityInbox {
         insertedCount++;
       }
     }
-    logger.info("PriorityInbox", "Finished processing batch", {
-      total: notifications.length,
-      inserted: insertedCount
-    });
+    Log("backend", "info", "service", `Finished processing batch of ${notifications.length} elements (inserted: ${insertedCount})`);
   }
 
   getTopNotifications() {
@@ -189,7 +178,7 @@ function renderTable(notifications, limit) {
 function simulateArrival(inbox, newBatch, delayMs) {
   return new Promise((resolve) => {
     setTimeout(() => {
-      logger.info("Simulation", "New stream notifications arrived", { count: newBatch.length });
+      Log("backend", "info", "cron_job", `New stream notifications arrived (count: ${newBatch.length})`);
       inbox.loadBatch(newBatch);
       resolve();
     }, delayMs);
@@ -198,11 +187,11 @@ function simulateArrival(inbox, newBatch, delayMs) {
 
 async function startApp() {
   const limit = parseInt(process.argv[2], 10) || 10;
-  logger.info("Main", "Initializing Demo Priority Inbox App", { limit });
+  Log("backend", "info", "service", `Initializing Demo Priority Inbox App with limit: ${limit}`);
 
   const inbox = new PriorityInbox(limit);
 
-  logger.info("Main", "Simulating Round 1 initial batch");
+  Log("backend", "info", "service", "Simulating Round 1 initial batch");
   inbox.loadBatch(SAMPLE_NOTIFICATIONS);
   renderTable(inbox.getTopNotifications(), limit);
 
@@ -215,10 +204,10 @@ async function startApp() {
   await simulateArrival(inbox, incoming, 100);
   renderTable(inbox.getTopNotifications(), limit);
 
-  logger.info("Main", "Simulation complete");
+  Log("backend", "info", "service", "Simulation complete");
 }
 
 startApp().catch((err) => {
-  logger.error("Main", "Process crashed", { error: err.message });
+  Log("backend", "fatal", "service", `Process crashed: ${err.message}`);
   process.exit(1);
 });
