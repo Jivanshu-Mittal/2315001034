@@ -196,3 +196,16 @@ node priorityInbox.js 10
 - **Per-user inboxes**: Shard the heap by `userID` to personalise the top-N.
 - **Read/unread tracking**: Mark notifications as read to remove them from the
   heap and surface the next best candidate.
+
+---
+
+### 10. Execution Output Screenshots
+
+Below are visual captures of the console execution output of `priorityInbox_demo.js` implementing the Priority Inbox algorithm:
+
+#### Screenshot 1: Initial Top-10 Notifications (Round 1 Batch)
+![Initial Output Screenshot](screenshot_initial.png)
+
+#### Screenshot 2: Updated Top-10 Notifications (After Round 2 Stream Arrivals & Eviction)
+![Updated Output Screenshot](screenshot_updated.png)
+
