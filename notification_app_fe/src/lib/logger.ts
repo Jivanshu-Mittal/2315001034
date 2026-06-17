@@ -21,7 +21,9 @@ export type BackendPackage =
 
 export type LogPackage = FrontendPackage | BackendPackage;
 
-const LOG_API_URL = "http://4.224.186.213/evaluation-service/logs";
+const LOG_API_URL = typeof window !== "undefined"
+  ? "/api/evaluation-service/logs"
+  : "http://4.224.186.213/evaluation-service/logs";
 
 /**
  * Retrieves the auth token from the browser session/env.
@@ -29,7 +31,8 @@ const LOG_API_URL = "http://4.224.186.213/evaluation-service/logs";
  */
 function getToken(): string {
   if (typeof window !== "undefined") {
-    return sessionStorage.getItem("api_token") ?? "";
+    const token = sessionStorage.getItem("api_token");
+    if (token) return token;
   }
   return process.env.NEXT_PUBLIC_API_TOKEN ?? "";
 }

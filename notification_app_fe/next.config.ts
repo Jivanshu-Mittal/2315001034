@@ -12,6 +12,14 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  async rewrites() {
+    return [
+      {
+        source: "/api/evaluation-service/:path*",
+        destination: "http://4.224.186.213/evaluation-service/:path*",
+      },
+    ];
+  },
 };
 
 export default nextConfig;
