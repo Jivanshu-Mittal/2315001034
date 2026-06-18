@@ -5,9 +5,9 @@
   "private": true,
   "scripts": {
     "start": "dotenv -e notification_app_fe/.env.local -- concurrently --kill-others-on-fail --prefix \"[{name}]\" --names \"frontend,backend\" --prefix-colors \"cyan,yellow\" \"npm run start:fe\" \"npm run start:be\"",
-    "start:fe": "cd notification_app_fe && npm run dev",
+    "start:fe": "npm run dev --prefix notification_app_fe",
     "start:be": "node notification_app_be/priorityInbox.js 10",
-    "install:all": "npm install && cd notification_app_fe && npm install",
+    "install:all": "npm install --prefix notification_app_fe",
     "register": "node register.js"
   },
   "dependencies": {

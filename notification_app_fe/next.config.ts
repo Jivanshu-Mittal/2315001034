@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
+  turbopack: {
+    // Explicitly set the workspace root to prevent Turbopack from getting confused by the root lockfile
+    root: __dirname,
+  },
   // Allow cross-origin requests to the evaluation API
   async headers() {
     return [
