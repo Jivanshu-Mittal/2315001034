@@ -1,0 +1,17 @@
+{
+  "name": "campus-notification-platform",
+  "version": "1.0.0",
+  "description": "Campus Notification Platform — Priority Inbox with Min-Heap Algorithm",
+  "private": true,
+  "scripts": {
+    "start": "dotenv -e notification_app_fe/.env.local -- concurrently --kill-others-on-fail --prefix \"[{name}]\" --names \"frontend,backend\" --prefix-colors \"cyan,yellow\" \"npm run start:fe\" \"npm run start:be\"",
+    "start:fe": "cd notification_app_fe && npm run dev",
+    "start:be": "node notification_app_be/priorityInbox.js 10",
+    "install:all": "npm install && cd notification_app_fe && npm install",
+    "register": "node register.js"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2",
+    "dotenv-cli": "^7.4.2"
+  }
+}
